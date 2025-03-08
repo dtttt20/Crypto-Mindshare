@@ -1,0 +1,14 @@
+{
+    "name": "Example Weight Config",
+    "description": "This is an example weight config",
+    "weights": {
+        "like_weight": 1.0,
+        "quote_weight": 1.0,
+        "reply_weight": 1.0,
+        "retweet_weight": 1.0,
+        "bookmark_weight": 1.0,
+        "impression_weight": 1.0,
+        "time_decay_half_life_days": 30
+    },
+    "is_active": true
+}

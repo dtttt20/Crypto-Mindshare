@@ -1,0 +1,72 @@
+version: '0.0.1'
+
+services:
+  timescaledb:
+    image: timescale/timescaledb-ha:pg17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+    restart: always
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  setup_mindshare_db:
+    image: danewharton/setup-mindshare-db:0.0.1
+    environment:
+      MINDSHARE_DB_URL: postgres://postgres:password@localhost/postgres
+    depends_on:
+      - timescaledb:
+        condition: service_healthy
+
+
+  tweet_processor:
+    image: danewharton/tweet-processor:0.0.1
+    environment:
+      DATABASE_HOST: db_host
+      DATABASE_NAME: postgres
+      DATABASE_USERNAME: db_username
+      DATABASE_PASSWORD: db_password
+      DATABASE_PORT: 5432
+      OPENAI_API_KEY: openai_api_key
+      MINDSHARE_DB_URL: postgres://postgres:password@localhost/postgres
+    depends_on:
+      - timescaledb
+      - redis
+      - setup_mindshare_db:
+        condition: service_completed_successfully
+
+
+  mindshare_processor:
+    image: danewharton/mindshare-processor:0.0.1
+    environment:
+      MINDSHARE_DB_URL: postgres://postgres:password@localhost/postgres
+    depends_on:
+      - timescaledb
+      - redis
+      - setup_mindshare_db:
+        condition: service_completed_successfully
+      - tweet_processor:
+        condition: service_completed_successfully
+
+  redis:
+    image: redis/redis:7.4-alpine
+    ports:
+      - "6379:6379"
+    restart: always
+    volumes:
+      - redis_data:/data
+    depends_on:
+      - timescaledb
+        condition: service_healthy
+
+volumes:
+  timescaledb_data:
+  redis_data:

@@ -1,0 +1,7 @@
+fastapi[standard]
+openai
+psycopg[binary]
+requests
+numpy
+pandas
+redis
