@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(process)d: \
-                    %(filename)s:%(lineno)d %(message)s", level=logging.DEBUG,
+                    %(filename)s:%(lineno)d %(message)s", level=logging.INFO,
                     stream=sys.stdout)
 logger = logging.getLogger("tweet_processor")
 
@@ -211,56 +211,25 @@ class TweetProcessor:
                 },
                 temperature=0
             )
-            dlogger.info(f"openrouter_raw_response: {response}")
-            
             content = response.choices[0].message.content
-            dlogger.info(f"content: {content}")
             
             try:
                 parsed_data = json.loads(content)
-                dlogger.info(f"parsed_data (json.loads): {parsed_data}")
                 validated_model = response_format(**parsed_data)
                 return validated_model.model_dump()
             except json.JSONDecodeError:
                 json_start = content.find('{')
-                dlogger.info(f"json_start: {json_start}")
                 if json_start == -1:
                     logger.error(f"No JSON object found in response: {content}")
                     return None
                     
                 parsed_data, _ = json.JSONDecoder().raw_decode(content[json_start:])
-                dlogger.info(f"parsed_data (jsondecoder): {parsed_data}")
                 validated_model = response_format(**parsed_data)
-                dlogger.info(f"validated_model: {validated_model}")
                 return validated_model.model_dump()
             else:
                 logger.error("Parsed response is None or invalid")
                 return None
-            
-            # logger.info(f"openrouter_raw_response: {response}")
-            # if response.choices[0].message.refusal:
-            #     logger.info(f"Failed to validate project/token {project_name or project_symbol or project_token}, \
-            #                 LLM refusal: {response.choices[0].message.refusal}")
-            #     return None, None
-            # return response.choices[0].message.parsed.model_dump()
-
-
-            # # try:
-            #     data = json.loads(response.choices[0].message.content)
-            #     logger.info(f"raw_data: {data}")
-            #     json_start = data.find('{')
-
-            #     if json_start == -1:
-            #         logger.error(f"No JSON object found in response: {data}")
-            #         raise
-            
-            #     parsed_data, _ = json.JSONDecoder().raw_decode(data[json_start:])                                          
-            #     parsed_response = response_format(**parsed_data).model_dump()
-            #     return parsed_response
-            # except Exception as e:
-            #     logger.error(f"Error parsing JSON response: {e}")
-            #     raise
-            
+           
         except Exception as e:
             logger.error(f"Error validating project/token {project_name or project_symbol or project_token}: {e}")
             return None
