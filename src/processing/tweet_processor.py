@@ -306,28 +306,28 @@ class TweetProcessor:
                     logger.debug(f"Successfully checked if project {project} exists with check_project_obj")
                     if project_exists:
                         logger.info(f"Project {project} already exists in database")
-                        self.save_extracted_info(tweet, table_id=project_exists)
+                        self.save_extracted_info(tweet, project_id=project_exists)
                     else:
                         project_validation = self.validate_crypto(project_name=project)
                         if project_validation and project_validation.get("project_exists"):
                             logger.info(f"Project {project} exists")
                             project_id = self.save_crypto_info(project_validation, project=project)
                             if project_id is not None:
-                                self.save_extracted_info(tweet, table_id=project_id)
+                                self.save_extracted_info(tweet, project_id=project_id)
                         else:
                             logger.info(f"Project {project} does not exist")
                 for token in tokens:
                     token_exists = self.check_project_obj(token)
                     if token_exists:
                         logger.info(f"Token {token} already exists in database")
-                        self.save_extracted_info(tweet, table_id=token_exists)
+                        self.save_extracted_info(tweet, project_id=token_exists)
                     else:
                         token_validation = self.validate_crypto(project_token=token)
                         if token_validation and token_validation.get("token_exists"):
                             logger.info(f"Token {token} exists")
                             project_id = self.save_crypto_info(token_validation, token=token)
                             if project_id is not None:
-                                self.save_extracted_info(tweet, table_id=project_id)
+                                self.save_extracted_info(tweet, project_id=project_id)
                         else:
                             logger.info(f"Token {token} does not exist")
             return timestamp
