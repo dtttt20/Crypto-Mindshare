@@ -106,8 +106,10 @@ class TweetProcessor:
         try:
             openai_api_key = os.getenv("OPENAI_API_KEY")
             perplexity_api_key = os.getenv("PERPLEXITY_API_KEY")
+            openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
             self.openai_client = OpenAI(api_key=openai_api_key)
             self.perplexity_client = OpenAI(base_url="https://api.perplexity.ai", api_key=perplexity_api_key)
+            self.openrouter_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_api_key)
             self.tweet_db_conn = psycopg.connect(
                 dbname=os.getenv("DATABASE_NAME"),
                 user=os.getenv("DATABASE_USERNAME"),
@@ -185,16 +187,16 @@ class TweetProcessor:
         elif project_symbol:
             response_format = ProjectValidatorToken
             prompt = f"Does the project symbol '{project_symbol}' exist? If the symbol is not a project but a token, return the correct project name."
-            prompt_output = "token_name, token_symbol, token_description, related_projects, token_aliases, token_exists."
+            prompt_output = "token_name, token_symbol, token_description, related_project, token_aliases, token_exists."
         elif project_token:
             response_format = ProjectValidatorToken
             prompt = f"Does the crypto token '{project_token}' exist? "
-            prompt_output = "token_name, token_symbol, token_description, related_projects, token_aliases, token_exists."
+            prompt_output = "token_name, token_symbol, token_description, related_project, token_aliases, token_exists."
         else:
             raise ValueError("No project name, symbol, or token provided")
         try:
-            response = self.perplexity_client.beta.chat.completions.parse(
-                model="sonar-pro",
+            response = self.openrouter_client.chat.completions.create(
+                model="perplexity/sonar-pro",
                 messages=[
                     {"role": "system", "content": "Be precise and concise. Return only the JSON object."},
                     {"role": "user", "content": (
@@ -203,27 +205,64 @@ class TweetProcessor:
                         prompt_output
                     )},
                 ],
-                response_format=response_format
+                response_format={
+                    "type": "json_schema",
+                    "schema": response_format.model_json_schema()
+                },
+                temperature=0
             )
-
-            try:
-                data = json.loads(response.choices[0].message.content)
-                logger.info(f"raw_data: {data}")
-                json_start = data.find('{')
-
-                if json_start == -1:
-                    logger.error(f"No JSON object found in response: {data}")
-                    raise
+            dlogger.info(f"openrouter_raw_response: {response}")
             
-                parsed_data, _ = json.JSONDecoder().raw_decode(data[json_start:])                                          
-                parsed_response = response_format(**parsed_data).model_dump()
-                return parsed_response
-            except Exception as e:
-                logger.error(f"Error parsing JSON response: {e}")
-                raise
+            content = response.choices[0].message.content
+            dlogger.info(f"content: {content}")
+            
+            try:
+                parsed_data = json.loads(content)
+                dlogger.info(f"parsed_data (json.loads): {parsed_data}")
+                validated_model = response_format(**parsed_data)
+                return validated_model.model_dump()
+            except json.JSONDecodeError:
+                json_start = content.find('{')
+                dlogger.info(f"json_start: {json_start}")
+                if json_start == -1:
+                    logger.error(f"No JSON object found in response: {content}")
+                    return None
+                    
+                parsed_data, _ = json.JSONDecoder().raw_decode(content[json_start:])
+                dlogger.info(f"parsed_data (jsondecoder): {parsed_data}")
+                validated_model = response_format(**parsed_data)
+                dlogger.info(f"validated_model: {validated_model}")
+                return validated_model.model_dump()
+            else:
+                logger.error("Parsed response is None or invalid")
+                return None
+            
+            # logger.info(f"openrouter_raw_response: {response}")
+            # if response.choices[0].message.refusal:
+            #     logger.info(f"Failed to validate project/token {project_name or project_symbol or project_token}, \
+            #                 LLM refusal: {response.choices[0].message.refusal}")
+            #     return None, None
+            # return response.choices[0].message.parsed.model_dump()
+
+
+            # # try:
+            #     data = json.loads(response.choices[0].message.content)
+            #     logger.info(f"raw_data: {data}")
+            #     json_start = data.find('{')
+
+            #     if json_start == -1:
+            #         logger.error(f"No JSON object found in response: {data}")
+            #         raise
+            
+            #     parsed_data, _ = json.JSONDecoder().raw_decode(data[json_start:])                                          
+            #     parsed_response = response_format(**parsed_data).model_dump()
+            #     return parsed_response
+            # except Exception as e:
+            #     logger.error(f"Error parsing JSON response: {e}")
+            #     raise
             
         except Exception as e:
-            logger.error(f"Error validating project {project_name}: {e}")
+            logger.error(f"Error validating project/token {project_name or project_symbol or project_token}: {e}")
             return None
         
     def check_project_obj(self, project=None, token=None):
