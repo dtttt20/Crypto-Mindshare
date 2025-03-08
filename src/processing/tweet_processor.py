@@ -68,8 +68,8 @@ class ProjectValidatorProject(BaseModel):
             return False
 
 class ProjectValidatorToken(BaseModel):
-    token_name: str = Field(description="The name of the token")
-    token_symbol: Optional[str] = Field(description="The symbol of the token")
+    token_name: str = Field(description="The name of the token. Return the name provided by the user if applicable.")
+    token_symbol: Optional[str] = Field(description="The symbol of the token. Return the symbol provided by the user if applicable.")
     token_description: str = Field(description="The description of the token")
     related_project: str = Field(description="The project related to the token. ONLY INCLUDE a verified project. DO NOT INCLUDE a possible project.")
     token_aliases: Optional[list[str]] = Field(description="The aliases of the token. ONLY INCLUDE verified aliases. DO NOT INCLUDE possible aliases.")
@@ -454,6 +454,7 @@ class TweetProcessor:
                     cur.execute("""
                         INSERT INTO tokens (token_name, project_id, token_symbol)
                         VALUES (%s, %s, %s)
+                        ON CONFLICT (project_id, token_name) DO NOTHING
                     """, (validation["token_name"], project_id, validation["token_symbol"]))
                     self.mindshare_db_conn.commit()
                     return project_id
