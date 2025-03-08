@@ -474,24 +474,34 @@ class TweetProcessor:
         Save extracted cryptocurrency information to the database.
         
         Args:
-            id (str): The ID of the tweet.
+            tweet (tuple): The tweet data.
             project_id (int): The ID of the project.
         """
         try:
             metrics = tweet[5]
             with self.mindshare_db_conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO mentions (tweet_timestamp, project_id, like_count, quote_count, reply_count, retweet_count, bookmark_count, impression_count, tweet_id, user_id)
+                    INSERT INTO mentions (tweet_timestamp, project_id, like_count, quote_count, reply_count, 
+                                         retweet_count, bookmark_count, impression_count, tweet_id, user_id)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """, (tweet[4], project_id, metrics["like_count"], metrics["quote_count"], metrics["reply_count"], metrics["retweet_count"], metrics["bookmark_count"], metrics["impression_count"], tweet[0], tweet[2]))
+                    ON CONFLICT (tweet_timestamp, project_id, tweet_id) DO NOTHING
+                """, (tweet[4], project_id, metrics["like_count"], metrics["quote_count"], 
+                     metrics["reply_count"], metrics["retweet_count"], metrics["bookmark_count"], 
+                     metrics["impression_count"], tweet[0], tweet[2]))
                 self.mindshare_db_conn.commit()
+                
+                # Log whether it was a new insertion or not
+                if cur.rowcount == 0:
+                    logger.debug(f"Mention for tweet {tweet[0]} and project {project_id} already exists, skipped")
+                else:
+                    logger.debug(f"Saved mention for tweet {tweet[0]} and project {project_id}")
+                
         except psycopg.Error as e:
             self.mindshare_db_conn.rollback()
-            logger.error(f"Database error while saving extracted info for "
-                         f"tweet {id}: {e}")
+            logger.error(f"Database error while saving extracted info for tweet {tweet[0]}: {e}")
         except Exception as e:
             self.mindshare_db_conn.rollback()
-            logger.error(f"Error saving extracted info for tweet {id}: {e}")
+            logger.error(f"Error saving extracted info for tweet {tweet[0]}: {e}")
 
     def process_batch_tweets(self, batch_size=100):
         """
