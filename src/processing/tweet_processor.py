@@ -471,12 +471,21 @@ class TweetProcessor:
                     return project_id
             elif token:
                 with self.mindshare_db_conn.cursor() as cur:
+                    project_name = validation["related_project"]
+                    check_project = self.check_project_obj(project=project_name)
+                    if check_project:
+                        project_id = check_project
+                    else:
+                        cur.execute("""
+                            INSERT INTO projects (project_name, is_active)
+                            VALUES (%s, %s)
+                            RETURNING project_id
+                        """, (project_name, True))
+                        project_id = cur.fetchone()[0]
                     cur.execute("""
                         INSERT INTO tokens (token_name, project_id, token_symbol)
                         VALUES (%s, %s, %s)
-                        RETURNING project_id
-                    """, (validation["token_name"], validation["related_project"], validation["token_symbol"]))
-                    project_id = cur.fetchone()[0]
+                    """, (validation["token_name"], project_id, validation["token_symbol"]))
                     self.mindshare_db_conn.commit()
                     return project_id
             else:
