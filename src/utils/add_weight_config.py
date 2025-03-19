@@ -9,6 +9,9 @@ import json
 from datetime import datetime
 import logging
 import psycopg
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -30,6 +33,9 @@ def parse_arguments():
 
 def load_weights(weights_input):
     """Load weights from a JSON string or file."""
+    if not weights_input:
+        raise ValueError("Weights input cannot be None")
+        
     try:
         return json.loads(weights_input)
     except json.JSONDecodeError:
@@ -123,6 +129,12 @@ def main():
             weights = load_weights(args.weights)
             active = not args.inactive
         
+        required_fields = ['like_weight', 'quote_weight', 'reply_weight', 'retweet_weight', 
+                          'bookmark_weight', 'impression_weight', 'time_decay_half_life_days']
+        missing_fields = [field for field in required_fields if field not in weights]
+        if missing_fields:
+            raise ValueError(f"Missing required weight fields: {', '.join(missing_fields)}")
+            
         weight_config = WeightConfig()
         weight_config.add_weight_config(name, description, weights, active)
     except Exception as e:
