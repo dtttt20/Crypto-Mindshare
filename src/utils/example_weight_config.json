@@ -10,5 +10,5 @@
         "impression_weight": 1.0,
         "time_decay_half_life_days": 30
     },
-    "is_active": true
+    "active": true
 }
