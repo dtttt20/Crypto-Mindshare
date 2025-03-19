@@ -106,9 +106,10 @@ class MindshareDB:
                 reply_count INTEGER,
                 retweet_count INTEGER,
                 bookmark_count INTEGER,
-                impression_count INTEGER,
-                tweet_id SMALLINT NOT NULL,
-                user_id SMALLINT NOT NULL,
+                impression_count BIGINT,
+                tweet_id VARCHAR(30) NOT NULL,
+                user_id VARCHAR(30) NOT NULL,
+                tweet_text TEXT NOT NULL,
                 CONSTRAINT mentions_pkey PRIMARY KEY (tweet_timestamp, project_id, tweet_id)
             );
         
@@ -126,15 +127,17 @@ class MindshareDB:
 
         create_user_influence_table = """
             CREATE TABLE IF NOT EXISTS user_influence (
-                user_id INTEGER PRIMARY KEY,
+                id SERIAL PRIMARY KEY,
+                user_id VARCHAR(30) NOT NULL,
                 follower_count INTEGER,
-                average_engagement INTEGER,
+                average_engagement BIGINT,
                 total_posts INTEGER,
                 last_updated TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
                 influence_score FLOAT
             );
 
             CREATE INDEX idx_user_influence_score ON user_influence(influence_score DESC);
+            CREATE UNIQUE INDEX idx_user_influence_user_id ON user_influence(user_id);
         """
 
         create_weight_config_table = """
@@ -178,10 +181,12 @@ class MindshareDB:
             CREATE TABLE IF NOT EXISTS influential_tweets (
                 id SERIAL PRIMARY KEY,
                 project_id INTEGER NOT NULL REFERENCES projects(project_id),
-                tweet_id INTEGER NOT NULL,
+                tweet_id VARCHAR(30) NOT NULL,
                 weighted_score FLOAT NOT NULL,
+                tweet_text TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL,
-                recorded_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                recorded_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT unique_project_tweet UNIQUE (project_id, tweet_id)
             );
 
             CREATE INDEX idx_influential_tweets_project ON influential_tweets(project_id);
