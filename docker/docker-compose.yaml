@@ -1,19 +1,17 @@
-version: '0.0.1'
-
 services:
   timescaledb:
     image: timescale/timescaledb-ha:pg17
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: postgres
+      POSTGRES_USER: ${TIMESCALEDB_USER}
+      POSTGRES_PASSWORD: ${TIMESCALEDB_PASSWORD}
+      POSTGRES_DB: ${TIMESCALEDB_DB}
     ports:
       - "5432:5432"
     volumes:
       - timescaledb_data:/var/lib/postgresql/data
-    restart: always
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "postgres"]
+      test: ["CMD", "pg_isready", "-U", "${TIMESCALEDB_USER}", "-d", "${TIMESCALEDB_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -21,52 +19,103 @@ services:
   setup_mindshare_db:
     image: danewharton/setup-mindshare-db:0.0.1
     environment:
-      MINDSHARE_DB_URL: postgres://postgres:password@localhost/postgres
+      MINDSHARE_DB_URL: ${MINDSHARE_DB_URL}
+      MINDSHARE_DEFAULT_DB_URL: ${MINDSHARE_DEFAULT_DB_URL}
     depends_on:
-      - timescaledb:
+      timescaledb:
         condition: service_healthy
+    restart: on-failure
 
-
-  tweet_processor:
-    image: danewharton/tweet-processor:0.0.1
+  add_weight_config:
+    image: danewharton/add-weight-config:0.0.1
     environment:
-      DATABASE_HOST: db_host
-      DATABASE_NAME: postgres
-      DATABASE_USERNAME: db_username
-      DATABASE_PASSWORD: db_password
-      DATABASE_PORT: 5432
-      OPENAI_API_KEY: openai_api_key
-      MINDSHARE_DB_URL: postgres://postgres:password@localhost/postgres
-    depends_on:
-      - timescaledb
-      - redis
-      - setup_mindshare_db:
-        condition: service_completed_successfully
+      MINDSHARE_DB_URL: ${MINDSHARE_DB_URL}
+    ## To add a weight config, uncomment the command below and run `docker compose up add_weight_config`
+    ## Or when initially running the docker compose file, uncomment and specify the weight config below
 
-
-  mindshare_processor:
-    image: danewharton/mindshare-processor:0.0.1
-    environment:
-      MINDSHARE_DB_URL: postgres://postgres:password@localhost/postgres
+    # command: ["python", "add_weight_config.py", "--json", "{
+    # "name": "Initial Weight Config",
+    # "description": "This is an example weight config",
+    # "weights": {
+    #     "like_weight": 0.6,
+    #     "quote_weight": 1.1,
+    #     "reply_weight": 0.8,
+    #     "retweet_weight": 1.0,
+    #     "bookmark_weight": 0.9,
+    #     "impression_weight": 0.6,
+    #     "time_decay_half_life_days": 30
+    # },
+    # "active": true
+    # }"]
     depends_on:
-      - timescaledb
-      - redis
-      - setup_mindshare_db:
+      timescaledb:
+        condition: service_healthy
+      setup_mindshare_db:
         condition: service_completed_successfully
-      - tweet_processor:
-        condition: service_completed_successfully
+    restart: on-failure
 
   redis:
     image: redis/redis:7.4-alpine
     ports:
       - "6379:6379"
-    restart: always
     volumes:
       - redis_data:/data
     depends_on:
-      - timescaledb
+      timescaledb:
         condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "redis-cli", "--raw", "incr", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mindshare_processor:
+    image: danewharton/mindshare-processor:0.0.1
+    environment:
+      MINDSHARE_DB_URL: ${MINDSHARE_DB_URL}
+      MINDSHARE_DEFAULT_DB_URL: ${MINDSHARE_DEFAULT_DB_URL}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_DB: ${REDIS_DB}
+      STARTING_TIMESTAMP: ${STARTING_TIMESTAMP}
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      setup_mindshare_db:
+        condition: service_completed_successfully
+      add_weight_config:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - tweet_processor_data:/starting_timestamp
+  fastapi:
+    image: danewharton/fastapi:0.0.1
+    environment:
+      MINDSHARE_DB_URL: ${MINDSHARE_DB_URL}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_DB: ${REDIS_DB}
+    ports:
+      - "8000:8000"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      setup_mindshare_db:
+        condition: service_completed_successfully
+      add_weight_config:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      mindshare_processor:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8000"]
 
 volumes:
   timescaledb_data:
   redis_data:
+  tweet_processor_data:
