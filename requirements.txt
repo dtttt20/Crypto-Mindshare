@@ -5,3 +5,6 @@ requests
 numpy
 pandas
 redis
+python-dotenv
+argparse
+pydantic
