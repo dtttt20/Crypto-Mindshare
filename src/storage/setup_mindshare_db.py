@@ -80,8 +80,8 @@ class MindshareDB:
                 created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             );
 
-            CREATE UNIQUE INDEX idx_project_alias ON project_aliases(project_id, alias);
-            CREATE INDEX idx_alias ON project_aliases(alias);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_project_alias ON project_aliases(project_id, alias);
+            CREATE INDEX IF NOT EXISTS idx_alias ON project_aliases(alias);
         """
 
         create_tokens_table = """
@@ -92,9 +92,8 @@ class MindshareDB:
                 token_symbol VARCHAR(30)
             );
 
-            CREATE UNIQUE INDEX idx_token_name ON tokens(project_id, token_name);
-            CREATE UNIQUE INDEX idx_token_symbol ON tokens(project_id, token_symbol);
-
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_token_name ON tokens(project_id, token_name);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_token_symbol ON tokens(project_id, token_symbol);
         """
 
         create_mentions_table = """
@@ -113,9 +112,9 @@ class MindshareDB:
                 CONSTRAINT mentions_pkey PRIMARY KEY (tweet_timestamp, project_id, tweet_id)
             );
         
-            CREATE INDEX idx_tweet_mentions_project_id ON mentions(project_id);
-            CREATE INDEX idx_tweet_mentions_tweet_id ON mentions(tweet_id);
-            CREATE INDEX idx_tweet_mentions_user_id ON mentions(user_id);
+            CREATE INDEX IF NOT EXISTS idx_tweet_mentions_project_id ON mentions(project_id);
+            CREATE INDEX IF NOT EXISTS idx_tweet_mentions_tweet_id ON mentions(tweet_id);
+            CREATE INDEX IF NOT EXISTS idx_tweet_mentions_user_id ON mentions(user_id);
         """
         create_mentions_hypertable = """
             SELECT create_hypertable(
@@ -136,8 +135,8 @@ class MindshareDB:
                 influence_score FLOAT
             );
 
-            CREATE INDEX idx_user_influence_score ON user_influence(influence_score DESC);
-            CREATE UNIQUE INDEX idx_user_influence_user_id ON user_influence(user_id);
+            CREATE INDEX IF NOT EXISTS idx_user_influence_score ON user_influence(influence_score DESC);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_user_influence_user_id ON user_influence(user_id);
         """
 
         create_weight_config_table = """
@@ -151,7 +150,7 @@ class MindshareDB:
                 updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             );
 
-            CREATE UNIQUE INDEX idx_active_weight ON weight_config(is_active) WHERE is_active = TRUE;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_active_weight ON weight_config(is_active) WHERE is_active = TRUE;
         """
 
         create_mindshare_snapshots_table = """
@@ -165,8 +164,8 @@ class MindshareDB:
                 ranking INTEGER
             );
 
-            CREATE INDEX idx_mindshare_snapshots_project_id ON mindshare_snapshots(project_id);
-            CREATE INDEX idx_mindshare_snapshots_ranking ON mindshare_snapshots(ranking);
+            CREATE INDEX IF NOT EXISTS idx_mindshare_snapshots_project_id ON mindshare_snapshots(project_id);
+            CREATE INDEX IF NOT EXISTS idx_mindshare_snapshots_ranking ON mindshare_snapshots(ranking);
         """
 
         create_mindshare_snapshots_hypertable = """
@@ -189,12 +188,12 @@ class MindshareDB:
                 CONSTRAINT unique_project_tweet UNIQUE (project_id, tweet_id)
             );
 
-            CREATE INDEX idx_influential_tweets_project ON influential_tweets(project_id);
-            CREATE INDEX idx_influential_tweets_score ON influential_tweets(weighted_score DESC);
+            CREATE INDEX IF NOT EXISTS idx_influential_tweets_project ON influential_tweets(project_id);
+            CREATE INDEX IF NOT EXISTS idx_influential_tweets_score ON influential_tweets(weighted_score DESC);
         """
 
         create_continuous_daily_mindshare_aggregates_table = """
-            CREATE MATERIALIZED VIEW daily_mindshare
+            CREATE MATERIALIZED VIEW IF NOT EXISTS daily_mindshare
             WITH (timescaledb.continuous) AS
             SELECT
                 project_id,
@@ -206,11 +205,10 @@ class MindshareDB:
 
                 FROM mindshare_snapshots
             GROUP BY project_id, weight_config_id, time_bucket('1 day', snapshot_timestamp);
-
         """
 
         create_daily_mindshare_aggregates_index = """
-            CREATE INDEX idx_daily_mindshare ON daily_mindshare(day, project_id, weight_config_id);
+            CREATE INDEX IF NOT EXISTS idx_daily_mindshare ON daily_mindshare(day, project_id, weight_config_id);
         """
 
         create_daily_mindshare_aggregate_snapshot_table = """
@@ -228,9 +226,9 @@ class MindshareDB:
                 snapshot_timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             );
 
-            CREATE INDEX idx_mindshare_snapshots_by_date ON mindshare_daily_snapshots(snapshot_timestamp, avg_daily_mindshare DESC);
-            CREATE INDEX idx_mindshare_snapshots_by_project ON mindshare_daily_snapshots(project_id, snapshot_timestamp);
-"""
+            CREATE INDEX IF NOT EXISTS idx_mindshare_snapshots_by_date ON mindshare_daily_snapshots(snapshot_timestamp, avg_daily_mindshare DESC);
+            CREATE INDEX IF NOT EXISTS idx_mindshare_snapshots_by_project ON mindshare_daily_snapshots(project_id, snapshot_timestamp);
+        """
         
 
         with self.mindshare_db_conn.cursor() as cur:
