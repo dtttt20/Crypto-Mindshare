@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: ${TIMESCALEDB_PASSWORD}
       POSTGRES_DB: ${TIMESCALEDB_DB}
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - timescaledb_data:/var/lib/postgresql/data
     restart: unless-stopped
@@ -16,8 +16,38 @@ services:
       timeout: 5s
       retries: 5
 
+  ## To use the sample tweet db, uncomment the following section
+  ## and uncomment the tweet archive version of TWEET_DATABASE_HOST, TWEET_DATABASE_NAME, etc.
+  ## and comment out the tweet db section
+
+  tweet_archive_db:
+    image: timescale/timescaledb-ha:pg17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: tweet_archive
+    ports:
+      - "5434:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "tweet_archive"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - ./tweet_archive_data:/data
+      - ./init_scripts:/docker-entrypoint-initdb.d
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
   setup_mindshare_db:
-    image: danewharton/setup-mindshare-db:0.0.1
+    #Production
+    # image: danewharton/setup-mindshare-db:0.0.1
+    #Development
+    build:
+      context: ../
+      dockerfile: docker/Dockerfile.setup-mindshare-db
     environment:
       MINDSHARE_DB_URL: ${MINDSHARE_DB_URL}
       MINDSHARE_DEFAULT_DB_URL: ${MINDSHARE_DEFAULT_DB_URL}
@@ -27,7 +57,12 @@ services:
     restart: on-failure
 
   add_weight_config:
-    image: danewharton/add-weight-config:0.0.1
+    #Production
+    # image: danewharton/add-weight-config:0.0.1
+    #Development
+    build:
+      context: ../
+      dockerfile: docker/Dockerfile.add-weight-config
     environment:
       MINDSHARE_DB_URL: ${MINDSHARE_DB_URL}
     ## To add a weight config, uncomment the command below and run `docker compose up add_weight_config`
@@ -55,9 +90,9 @@ services:
     restart: on-failure
 
   redis:
-    image: redis/redis:7.4-alpine
+    image: redis:7.4-alpine
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
       - redis_data:/data
     depends_on:
@@ -71,14 +106,33 @@ services:
       retries: 5
 
   mindshare_processor:
-    image: danewharton/mindshare-processor:0.0.1
+    #Production
+    # image: danewharton/mindshare-processor:0.0.1
+    #Development
+    build:
+      context: ../
+      dockerfile: docker/Dockerfile.mindshare-processor
     environment:
+      TWEET_DATABASE_HOST: ${TWEET_DATABASE_HOST}
+      TWEET_DATABASE_NAME: ${TWEET_DATABASE_NAME}
+      TWEET_DATABASE_USERNAME: ${TWEET_DATABASE_USERNAME}
+      TWEET_DATABASE_PASSWORD: ${TWEET_DATABASE_PASSWORD}
+      TWEET_DATABASE_PORT: ${TWEET_DATABASE_PORT}
       MINDSHARE_DB_URL: ${MINDSHARE_DB_URL}
       MINDSHARE_DEFAULT_DB_URL: ${MINDSHARE_DEFAULT_DB_URL}
       REDIS_HOST: ${REDIS_HOST}
       REDIS_PORT: ${REDIS_PORT}
       REDIS_DB: ${REDIS_DB}
       STARTING_TIMESTAMP: ${STARTING_TIMESTAMP}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      PERPLEXITY_API_KEY: ${PERPLEXITY_API_KEY}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      MAX_TWEETS_PER_BATCH: ${MAX_TWEETS_PER_BATCH}
+      MAX_CONCURRENT_TWEETS: ${MAX_CONCURRENT_TWEETS}
+      MAX_CONCURRENT_VALIDATIONS: ${MAX_CONCURRENT_VALIDATIONS}
+      OPENAI_MAX_CONCURRENT_REQUESTS: ${OPENAI_MAX_CONCURRENT_REQUESTS}
+      OPENROUTER_MAX_CONCURRENT_REQUESTS: ${OPENROUTER_MAX_CONCURRENT_REQUESTS}
+      PERPLEXITY_MAX_CONCURRENT_REQUESTS: ${PERPLEXITY_MAX_CONCURRENT_REQUESTS}
     depends_on:
       timescaledb:
         condition: service_healthy
@@ -92,7 +146,12 @@ services:
     volumes:
       - tweet_processor_data:/starting_timestamp
   fastapi:
-    image: danewharton/fastapi:0.0.1
+    #Production
+    # image: danewharton/fastapi:0.0.1
+    #Development
+    build:
+      context: ../
+      dockerfile: docker/Dockerfile.fastapi
     environment:
       MINDSHARE_DB_URL: ${MINDSHARE_DB_URL}
       REDIS_HOST: ${REDIS_HOST}
