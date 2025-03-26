@@ -3,7 +3,7 @@ from openai import AsyncOpenAI
 import psycopg
 import os
 from typing import List, Optional, Union, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import logging
 import sys
@@ -155,38 +155,31 @@ class TweetProcessor:
             self.async_perplexity_client = AsyncOpenAI(base_url="https://api.perplexity.ai", api_key=perplexity_api_key)
             self.async_openrouter_client = AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_api_key)
             
-            self.max_concurrent_tweets = 200
-            self.max_concurrent_validations = 70
-            
-            # self.tweet_db_conn = psycopg.connect(
-            #     dbname=os.getenv("DATABASE_NAME"),
-            #     user=os.getenv("DATABASE_USERNAME"),
-            #     password=os.getenv("DATABASE_PASSWORD"),
-            #     host=os.getenv("DATABASE_HOST"),
-            #     port=os.getenv("DATABASE_PORT")
-            # )
+            self.max_concurrent_tweets = int(os.getenv("MAX_CONCURRENT_TWEETS", 200))
+            self.max_concurrent_validations = int(os.getenv("MAX_CONCURRENT_VALIDATIONS", 70))
+           
             self.tweet_db_conn = psycopg.connect(
-                dbname=os.getenv("DATABASE_NAME"),
-                user=os.getenv("DATABASE_USERNAME"),
-                password=os.getenv("DATABASE_PASSWORD"),
-                host=os.getenv("DATABASE_HOST"),
-                port=os.getenv("DATABASE_PORT")
+                dbname=os.getenv("TWEET_DATABASE_NAME"),
+                user=os.getenv("TWEET_DATABASE_USERNAME"),
+                password=os.getenv("TWEET_DATABASE_PASSWORD"),
+                host=os.getenv("TWEET_DATABASE_HOST"),
+                port=os.getenv("TWEET_DATABASE_PORT")
             )
             self.mindshare_db_conn = psycopg.connect(
                 os.getenv("MINDSHARE_DB_URL")
             )
-            self.checkpoint_file = "last_processed_tweet_timestamp.txt"
+            self.checkpoint_file = "starting_timestamp/last_processed_tweet_timestamp.txt"
             
             self.openai_rate_limiter = RateLimiter(
-                max_calls=4900,
+                max_calls=int(os.getenv("OPENAI_MAX_CONCURRENT_REQUESTS", 4900)),
                 time_window_seconds=60
             )
             self.openrouter_rate_limiter = RateLimiter(
-                max_calls=65,
+                max_calls=int(os.getenv("OPENROUTER_MAX_CONCURRENT_REQUESTS", 65)),
                 time_window_seconds=10
             )
             self.perplexity_rate_limiter = RateLimiter(
-                max_calls=60,
+                max_calls=int(os.getenv("PERPLEXITY_MAX_CONCURRENT_REQUESTS", 60)),
                 time_window_seconds=60
             )
         except psycopg.Error as e:
@@ -210,27 +203,75 @@ class TweetProcessor:
             logger.error(f"Database connection test failed: {e}")
             raise
     
+    def ensure_timezone_aware(self, dt):
+        """
+        Ensure a datetime is in UTC timezone.
+        If the datetime has a different timezone, convert it to UTC.
+        If the datetime is naive (no timezone), assume it's UTC and mark it as such.
+        
+        Args:
+            dt (datetime): The datetime to check
+            
+        Returns:
+            datetime: The datetime in UTC timezone
+            
+        Raises:
+            ValueError: If the datetime is None
+        """
+        if dt is None:
+            raise ValueError("Cannot process None datetime")
+            
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        elif dt.tzinfo != timezone.utc:
+            return dt.astimezone(timezone.utc)
+        else:
+            return dt
+
     def get_last_processed_timestamp(self):
         """
         Get the timestamp of the last processed tweet.
         
         Returns:
             datetime: The timestamp of the last processed tweet or a default
-                      date if no previous processing has occurred.
+                      date if no previous processing has occurred, always in UTC timezone.
+                      
+        Raises:
+            ValueError: If the timestamp from environment variable is not in UTC timezone
         """
         try:
+            if not os.path.exists(self.checkpoint_file):
+                default_date_str = os.getenv('STARTING_TIMESTAMP', '2025-02-24T11:00:00Z')
+                dt = datetime.fromisoformat(default_date_str)
+
+                if dt.tzinfo is not None and dt.tzinfo != timezone.utc:
+                    raise ValueError(f"Starting timestamp from environment variable must be in UTC timezone, got {dt.tzinfo}")
+                
+                dt = self.ensure_timezone_aware(dt)
+                
+                return dt
+
             with open(self.checkpoint_file, 'r') as f:
                 lines = f.readlines()
                 if lines:
                     timestamp_str = lines[-1].strip()
-                    return datetime.fromisoformat(timestamp_str)
+                    dt = datetime.fromisoformat(timestamp_str)
+                    return self.ensure_timezone_aware(dt)
                 else:
-                    # Use environment variable if available, otherwise use default
-                    default_date_str = os.getenv('DEFAULT_START_DATE', '2025-02-24T11:00:00')
-                    return datetime.fromisoformat(default_date_str)
-        except (FileNotFoundError, ValueError):
-            default_date_str = os.getenv('DEFAULT_START_DATE', '2025-02-24T11:00:00')
-            return datetime.fromisoformat(default_date_str)
+                    default_date_str = os.getenv('STARTING_TIMESTAMP', '2025-02-24T11:00:00Z')
+                    dt = datetime.fromisoformat(default_date_str)
+
+                    if dt.tzinfo is not None and dt.tzinfo != timezone.utc:
+                        raise ValueError(f"Starting timestamp from environment variable must be in UTC timezone, got {dt.tzinfo}")
+                    
+                    return self.ensure_timezone_aware(dt)
+
+        except ValueError as e:
+            logger.error(f"Invalid timestamp format: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Error getting last processed timestamp: {e}")
+            raise
     
     def save_last_processed_timestamp(self, timestamp):
         """
@@ -238,7 +279,15 @@ class TweetProcessor:
         
         Args:
             timestamp (datetime): The timestamp to save.
+            
+        Raises:
+            ValueError: If the timestamp is None
         """
+        if timestamp is None:
+            raise ValueError("Cannot save None timestamp")
+            
+        timestamp = self.ensure_timezone_aware(timestamp)
+            
         with open(self.checkpoint_file, 'a') as f:
             f.write(str(timestamp) + '\n')
         
@@ -361,7 +410,7 @@ class TweetProcessor:
         try:
             id = tweet[0]
             text = tweet[1]
-            timestamp = tweet[4]
+            timestamp = self.ensure_timezone_aware(tweet[4])
             
             projects, tokens = self.extract_crypto_mentions(text)
             
@@ -377,34 +426,34 @@ class TweetProcessor:
                     logger.debug(f"Successfully checked if project {project} exists with check_project_obj")
                     if project_exists:
                         logger.info(f"Project {project} already exists in database")
-                        self.save_extracted_info(tweet, project_id=project_exists)
+                        self.save_extracted_info(tweet, timestamp, project_id=project_exists)
                     else:
                         project_validation = self.validate_crypto(project_name=project)
                         if project_validation and project_validation.get("project_exists"):
                             logger.info(f"Project {project} exists")
                             project_id = self.save_crypto_info(project_validation, project=project)
                             if project_id is not None:
-                                self.save_extracted_info(tweet, project_id=project_id)
+                                self.save_extracted_info(tweet, timestamp, project_id=project_id)
                         else:
                             logger.info(f"Project {project} does not exist")
                 for token in tokens:
                     token_exists = self.check_project_obj(token)
                     if token_exists:
                         logger.info(f"Token {token} already exists in database")
-                        self.save_extracted_info(tweet, project_id=token_exists)
+                        self.save_extracted_info(tweet, timestamp, project_id=token_exists)
                     else:
                         token_validation = self.validate_crypto(project_token=token)
                         if token_validation and token_validation.get("token_exists"):
                             logger.info(f"Token {token} exists")
                             project_id = self.save_crypto_info(token_validation, token=token)
                             if project_id is not None:
-                                self.save_extracted_info(tweet, project_id=project_id)
+                                self.save_extracted_info(tweet, timestamp, project_id=project_id)
                         else:
                             logger.info(f"Token {token} does not exist")
             return timestamp
         except Exception as e:
-            logger.error(f"Error processing tweet {tweet[0] if len(tweet) > 0 \
-                                                   else 'unknown'}: {e}")
+            logger.error(f"Error processing tweet "
+                         f"{tweet[0] if len(tweet) > 0 else 'unknown'}: {e}")
             return tweet[4] if len(tweet) > 4 else None
     
     def extract_crypto_mentions(self, text):
@@ -457,8 +506,8 @@ class TweetProcessor:
             crypto_project_extraction = response.choices[0].message
             data = json.loads(crypto_project_extraction.content)
             if crypto_project_extraction.refusal:
-                logger.info(f"Failed to extract crypto projects or tokens, \
-                            LLM refusal: {crypto_project_extraction.refusal}")
+                logger.info(f"Failed to extract crypto projects or tokens,"
+                            f" LLM refusal: {crypto_project_extraction.refusal}")
                 return None, None
             else:
                 projects = data.get("projects")
@@ -466,8 +515,8 @@ class TweetProcessor:
                 return projects, tokens
                 
         except Exception as e:
-            logger.error(f"Error extracting crypto projects: {e}, \
-                         text: {text}")
+            logger.error(f"Error extracting crypto projects: {e},"
+                         f" text: {text}")
             return None, None
         
     def save_crypto_info(self, validation, project=None, token=None):
@@ -480,17 +529,22 @@ class TweetProcessor:
                     cur.execute("""
                         INSERT INTO projects (project_name, description, is_active)
                         VALUES (%s, %s, %s)
+                        ON CONFLICT (project_name) DO UPDATE 
+                        SET description = EXCLUDED.description
                         RETURNING project_id
                     """, (project, validation["project_description"], validation["project_exists"]))
                     project_id = cur.fetchone()[0]
                     self.mindshare_db_conn.commit()
+                    
                     if validation["project_aliases"] and len(validation["project_aliases"]) > 0:
                         for alias in validation["project_aliases"]:
                             cur.execute("""
                                 INSERT INTO project_aliases (project_id, alias)
                                 VALUES (%s, %s)
-                                """, (project_id, alias))
+                                ON CONFLICT (project_id, alias) DO NOTHING
+                            """, (project_id, alias))
                             self.mindshare_db_conn.commit()
+                            
                     if validation["related_tokens"] and len(validation["related_tokens"]) > 0:
                         for token in validation["related_tokens"]:
                             if isinstance(token, (list, tuple)) and len(token) >= 2:
@@ -506,7 +560,8 @@ class TweetProcessor:
                             cur.execute("""
                                 INSERT INTO tokens (token_name, project_id, token_symbol)
                                 VALUES (%s, %s, %s)
-                                """, (token_name, project_id, token_symbol))
+                                ON CONFLICT (project_id, token_name) DO NOTHING
+                            """, (token_name, project_id, token_symbol))
                             self.mindshare_db_conn.commit()
                     return project_id
             elif token:
@@ -541,7 +596,7 @@ class TweetProcessor:
             logger.error(f"Error saving extracted info for tweet {id}: {e}")
             return None
     
-    def save_extracted_info(self, tweet, project_id):
+    def save_extracted_info(self, tweet, timestamp, project_id):
         """
         Save extracted cryptocurrency information to the database.
         
@@ -554,12 +609,12 @@ class TweetProcessor:
             with self.mindshare_db_conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO mentions (tweet_timestamp, project_id, like_count, quote_count, reply_count, 
-                                         retweet_count, bookmark_count, impression_count, tweet_id, user_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                         retweet_count, bookmark_count, impression_count, tweet_id, user_id, tweet_text)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (tweet_timestamp, project_id, tweet_id) DO NOTHING
-                """, (tweet[4], project_id, metrics["like_count"], metrics["quote_count"], 
+                """, (timestamp, project_id, metrics["like_count"], metrics["quote_count"], 
                      metrics["reply_count"], metrics["retweet_count"], metrics["bookmark_count"], 
-                     metrics["impression_count"], tweet[0], tweet[2]))
+                     metrics["impression_count"], tweet[0], tweet[2], tweet[1]))
                 self.mindshare_db_conn.commit()
                 
                 # Log whether it was a new insertion or not
@@ -619,8 +674,7 @@ class TweetProcessor:
                             processed_count += 1
                     except Exception as e:
                         logger.error(f"Failed to process tweet "
-                                     f"{tweet[0] if len(tweet) > 0 \
-                                        else 'unknown'}: {e}")
+                                     f"{tweet[0] if len(tweet) > 0 else 'unknown'}: {e}")
                         continue
                 
                 self.save_last_processed_timestamp(last_successful_timestamp)
@@ -749,8 +803,8 @@ class TweetProcessor:
             crypto_project_extraction = response.choices[0].message
             data = json.loads(crypto_project_extraction.content)
             if crypto_project_extraction.refusal:
-                logger.info(f"Failed to extract crypto projects or tokens, \
-                            LLM refusal: {crypto_project_extraction.refusal}")
+                logger.info(f"Failed to extract crypto projects or tokens, "
+                            f"LLM refusal: {crypto_project_extraction.refusal}")
                 return None, None
             else:
                 projects = data.get("projects")
@@ -758,8 +812,8 @@ class TweetProcessor:
                 return projects, tokens
                 
         except Exception as e:
-            logger.error(f"Error extracting crypto projects: {e}, \
-                         text: {text}")
+            logger.error(f"Error extracting crypto projects: {e}, "
+                         f"text: {text}")
             return None, None
     
     async def async_process_tweet(self, tweet):
@@ -776,7 +830,7 @@ class TweetProcessor:
         try:
             id = tweet[0]
             text = tweet[1]
-            timestamp = tweet[4]
+            timestamp = self.ensure_timezone_aware(tweet[4])
             
             projects, tokens = await self.async_extract_crypto_mentions(text)
             
@@ -799,7 +853,7 @@ class TweetProcessor:
                     logger.debug(f"Successfully checked if project {project} exists with check_project_obj")
                     if project_exists:
                         logger.info(f"Project {project} already exists in database")
-                        self.save_extracted_info(tweet, project_id=project_exists)
+                        self.save_extracted_info(tweet, timestamp, project_id=project_exists)
                     else:
                         # Create validation task and track it
                         task = self.async_validate_crypto(project_name=project)
@@ -811,7 +865,7 @@ class TweetProcessor:
                     token_exists = self.check_project_obj(token=token)
                     if token_exists:
                         logger.info(f"Token {token} already exists in database")
-                        self.save_extracted_info(tweet, project_id=token_exists)
+                        self.save_extracted_info(tweet, timestamp, project_id=token_exists)
                     else:
                         # Create validation task and track it
                         task = self.async_validate_crypto(project_token=token)
@@ -837,7 +891,7 @@ class TweetProcessor:
                                 logger.info(f"Project {project} exists")
                                 project_id = self.save_crypto_info(result, project=project)
                                 if project_id is not None:
-                                    self.save_extracted_info(tweet, project_id=project_id)
+                                    self.save_extracted_info(tweet, timestamp, project_id=project_id)
                             else:
                                 logger.info(f"Project {project} does not exist")
                         else:
@@ -846,14 +900,14 @@ class TweetProcessor:
                                 logger.info(f"Token {token} exists")
                                 project_id = self.save_crypto_info(result, token=token)
                                 if project_id is not None:
-                                    self.save_extracted_info(tweet, project_id=project_id)
+                                    self.save_extracted_info(tweet, timestamp, project_id=project_id)
                             else:
                                 logger.info(f"Token {token} does not exist")
             
             return timestamp
         except Exception as e:
-            logger.error(f"Error processing tweet {tweet[0] if len(tweet) > 0 \
-                                                   else 'unknown'}: {e}")
+            logger.error(f"Error processing tweet"
+                         f" {tweet[0] if len(tweet) > 0 else 'unknown'}: {e}")
             return tweet[4] if len(tweet) > 4 else None
     
     async def async_process_batch_tweets(self, batch_size=100):
@@ -905,6 +959,7 @@ class TweetProcessor:
                     if isinstance(result, Exception):
                         logger.error(f"Failed to process tweet {tweets[i][0]}: {result}")
                     elif result:
+                        result = self.ensure_timezone_aware(result)
                         last_successful_timestamp = max(last_successful_timestamp, result)
                         processed_count += 1
                 
@@ -943,7 +998,7 @@ def main():
         # processor.test_connection()
         # processor.process_batch_tweets(batch_size=50)
         
-        asyncio.run(processor.async_process_batch_tweets(batch_size=200))
+        asyncio.run(processor.async_process_batch_tweets(batch_size=int(os.getenv("MAX_TWEETS_PER_BATCH", 200))))
     except Exception as e:
         logger.critical(f"Fatal error in main function: {e}")
         sys.exit(1)
