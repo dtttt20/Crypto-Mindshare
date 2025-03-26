@@ -4,6 +4,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/utils/add_weight_config.py .
-COPY src/utils/weight_config1.json .
+COPY src/utils/default_weight_config.json .
 
-CMD python add_weight_config.py --json weight_config1.json
+CMD python add_weight_config.py --json default_weight_config.json
