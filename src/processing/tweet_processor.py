@@ -147,13 +147,13 @@ class TweetProcessor:
             openai_api_key = os.getenv("OPENAI_API_KEY")
             perplexity_api_key = os.getenv("PERPLEXITY_API_KEY")
             openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
-            self.openai_client = OpenAI(api_key=openai_api_key)
-            self.perplexity_client = OpenAI(base_url="https://api.perplexity.ai", api_key=perplexity_api_key)
-            self.openrouter_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_api_key)
             
+            self.openai_client = OpenAI(api_key=openai_api_key)
             self.async_openai_client = AsyncOpenAI(api_key=openai_api_key)
-            self.async_perplexity_client = AsyncOpenAI(base_url="https://api.perplexity.ai", api_key=perplexity_api_key)
-            self.async_openrouter_client = AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_api_key)
+            
+            self.validation_client, self.async_validation_client, self.validation_model = self._initialize_validation_client(
+                perplexity_api_key, openrouter_api_key
+            )
             
             self.max_concurrent_tweets = int(os.getenv("MAX_CONCURRENT_TWEETS", 200))
             self.max_concurrent_validations = int(os.getenv("MAX_CONCURRENT_VALIDATIONS", 70))
@@ -188,6 +188,40 @@ class TweetProcessor:
         except Exception as e:
             logger.critical(f"Initialization error: {e}")
             raise
+
+    def _initialize_validation_client(self, perplexity_api_key: str, openrouter_api_key: str) -> Tuple[OpenAI, AsyncOpenAI, str]:
+        """
+        Initialize the validation client based on available API keys.
+        Prioritizes Perplexity API if both keys are available.
+        
+        Args:
+            perplexity_api_key (str): The Perplexity API key
+            openrouter_api_key (str): The OpenRouter API key
+            
+        Returns:
+            Tuple[OpenAI, AsyncOpenAI, str]: A tuple containing the synchronous client, 
+                                           asynchronous client, and the model name to use
+            
+        Raises:
+            ValueError: If neither API key is available
+        """
+        if perplexity_api_key:
+            logger.info("Using Perplexity API for validation")
+            return (
+                OpenAI(base_url="https://api.perplexity.ai", api_key=perplexity_api_key),
+                AsyncOpenAI(base_url="https://api.perplexity.ai", api_key=perplexity_api_key),
+                "sonar-pro"
+            )
+        elif openrouter_api_key:
+            logger.info("Using OpenRouter API for validation")
+            return (
+                OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_api_key),
+                AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_api_key),
+                "perplexity/sonar-pro"
+            )
+        else:
+            raise ValueError("Neither Perplexity nor OpenRouter API key is available")
+
     def test_connection(self):
         '''
         Test the database connection by executing a simple query.
@@ -293,7 +327,7 @@ class TweetProcessor:
         
     def validate_crypto(self, project_name=None, project_symbol=None, project_token=None):
         """
-        Validate a project name using Perplexity API.
+        Validate a project name using the configured validation client.
         
         Args:
             project_name (str): The name of the project to validate.
@@ -315,8 +349,8 @@ class TweetProcessor:
         else:
             raise ValueError("No project name, symbol, or token provided")
         try:
-            response = self.openrouter_client.chat.completions.create(
-                model="perplexity/sonar-pro",
+            response = self.validation_client.chat.completions.create(
+                model=self.validation_model,
                 messages=[
                     {"role": "system", "content": "Be precise and concise. Return only the JSON object."},
                     {"role": "user", "content": (
@@ -346,8 +380,8 @@ class TweetProcessor:
                 parsed_data, _ = json.JSONDecoder().raw_decode(content[json_start:])
                 validated_model = response_format(**parsed_data)
                 return validated_model.model_dump()
-            else:
-                logger.error("Parsed response is None or invalid")
+            except Exception as e:
+                logger.error(f"Error parsing response: {e}")
                 return None
            
         except Exception as e:
@@ -688,7 +722,7 @@ class TweetProcessor:
 
     async def async_validate_crypto(self, project_name=None, project_symbol=None, project_token=None):
         """
-        Async version of validate_crypto using the async OpenAI client.
+        Async version of validate_crypto using the async validation client.
         
         Args:
             project_name (str): The name of the project to validate.
@@ -712,8 +746,8 @@ class TweetProcessor:
         else:
             raise ValueError("No project name, symbol, or token provided")
         try:
-            response = await self.async_openrouter_client.chat.completions.create(
-                model="perplexity/sonar-pro",
+            response = await self.async_validation_client.chat.completions.create(
+                model=self.validation_model,
                 messages=[
                     {"role": "system", "content": "Be precise and concise. Return only the JSON object."},
                     {"role": "user", "content": (
