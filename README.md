@@ -36,7 +36,7 @@ The user config section is used to configure the project for the user. It is set
 OPENAI_API_KEY=your_openai_api_key
 ```
 
-######Perplexity API key or Openrouter API key:
+###### Perplexity API key or Openrouter API key:
 ```
 PERPLEXITY_API_KEY=your_perplexity_api_key
 OPENROUTER_API_KEY=your_openrouter_api_key
