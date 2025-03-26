@@ -3,7 +3,7 @@ from psycopg.rows import dict_row
 import redis
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 import json
 from typing import Dict, List, Tuple, Any, Optional
@@ -24,18 +24,18 @@ class MindshareCalculator:
     social media mentions.
     """
     
-    def __init__(self, redis_config: Dict[str, Any]):
+    def __init__(self):
         """
         Initialize the calculator with database and Redis configurations.
-        
-        Args:
-            db_config: Database connection parameters
-            redis_config: Redis connection parameters
         """
         self.mindshare_db_conn = psycopg.connect(
                 os.getenv("MINDSHARE_DB_URL")
         )
-        # self.redis_client = redis.Redis(**redis_config)
+        self.redis_client = redis.Redis(
+            host=os.getenv("REDIS_HOST"),
+            port=int(os.getenv("REDIS_PORT", 6379)),
+            db=os.getenv("REDIS_DB")
+        )
     
     def get_active_weight_config(self) -> Dict[str, Any]:
         """
@@ -66,14 +66,15 @@ class MindshareCalculator:
         Returns:
             Tuple containing the mentions DataFrame and current timestamp
         """
-        timestamp = datetime.now()
+        timestamp = datetime.now(timezone.utc)
         cutoff_date = timestamp - timedelta(days=days)
         
         query = """
             SELECT 
                 tweet_timestamp, project_id, 
                 like_count, quote_count, reply_count, retweet_count,
-                bookmark_count, impression_count, tweet_id, user_id
+                bookmark_count, impression_count, tweet_id, user_id,
+                tweet_text
             FROM mentions
             WHERE tweet_timestamp > %s
         """
@@ -172,8 +173,8 @@ class MindshareCalculator:
             project_weights['ranking'] = range(1, len(project_weights) + 1)
             
             self.store_mindshare_results(project_weights, weight_id, timestamp)
-            #self.update_redis_cache(project_weights, weight_id, timestamp)
-            #self.update_influential_tweets(mentions_df, weights, timestamp)
+            self.update_redis_cache(project_weights, weight_id, timestamp)
+            self.update_influential_tweets(mentions_df, weights, timestamp)
             logger.info("Mindshare calculation completed successfully")
             return True
             
@@ -230,107 +231,149 @@ class MindshareCalculator:
             weight_id: ID of the weight configuration used
             timestamp: Current timestamp
         """
-        timestamp_str = timestamp.strftime("%Y-%m-%d-%H-%M")
-        logger.info("Updating Redis cache")
+        if 'project_id' not in project_weights.columns or 'mindshare_percentage' not in project_weights.columns:
+            logger.error("Project weights DataFrame missing required columns 'project_id' or 'mindshare_percentage'. Aborting update_redis_cache.")
+            return
         
-        ranking_key = f"mindshare_ranking:{weight_id}:{timestamp_str}"
-        pipeline = self.redis_client.pipeline()
-        
-        pipeline.delete(ranking_key)
-        
-        top_100 = project_weights.head(100)
-        for _, row in top_100.iterrows():
-            pipeline.zadd(
-                ranking_key, 
-                {str(int(row['project_id'])): float(row['mindshare_percentage'])}
-            )
-        
-        # 24hr expiry
-        pipeline.expire(ranking_key, 86400)
-        
-        # Update current day's data for each project
-        day_str = timestamp.strftime("%Y-%m-%d")
-        for _, row in project_weights.iterrows():
-            project_key = f"project_mindshare:{int(row['project_id'])}:{weight_id}"
-            pipeline.hset(
-                project_key,
-                day_str,
-                float(row['mindshare_percentage'])
-            )
-            pipeline.expire(project_key, 30 * 86400)  # 30 days expiry
-        
-        pipeline.execute()
-        
-        self.update_gainers_losers_cache(weight_id, timestamp)
+        try:
+            timestamp_str = timestamp.strftime("%Y-%m-%d-%H-%M-%S")
+            logger.info("Updating Redis cache")
+            
+            ranking_key = f"mindshare_ranking:{weight_id}:{timestamp_str}"
+            pipeline = self.redis_client.pipeline()
+            
+            pipeline.delete(ranking_key)
+            top_100 = project_weights.head(100)
+            for _, row in top_100.iterrows():
+                pipeline.zadd(
+                    ranking_key, 
+                    {str(int(row['project_id'])): float(row['mindshare_percentage'])}
+                )
+            pipeline.expire(ranking_key, 86400)  # 24hr expiry
+            
+            try:
+                pipeline.execute()
+            except Exception as e:
+                logger.error(f"Error executing Redis pipeline for ranking key: {e}", exc_info=True)
+            
+            day_str = timestamp.strftime("%Y-%m-%d")
+            batch_size = 100
+            pipeline = self.redis_client.pipeline()
+            count = 0
+            
+            for _, row in project_weights.iterrows():
+                project_key = f"project_mindshare:{int(row['project_id'])}:{weight_id}"
+                pipeline.hset(project_key, day_str, float(row['mindshare_percentage']))
+                pipeline.expire(project_key, 30 * 86400)  # 30 days expiry
+                count += 1
+                
+                if count % batch_size == 0:
+                    try:
+                        pipeline.execute()
+                    except Exception as e:
+                        logger.error(f"Error executing Redis pipeline batch for project_mindshare: {e}", exc_info=True)
+                    pipeline = self.redis_client.pipeline()
+            
+            try:
+                pipeline.execute()
+            except Exception as e:
+                logger.error(f"Error executing final Redis pipeline batch for project_mindshare: {e}", exc_info=True)
+            
+            self.update_gainers_losers_cache(weight_id, timestamp)
+            
+        except Exception as e:
+            logger.error(f"Error in update_redis_cache: {e}", exc_info=True)
     
     def update_gainers_losers_cache(self, weight_id: int, timestamp: datetime) -> None:
         """
         Calculate and update top gainers and losers in the Redis cache.
+        Uses a 24-hour window for the selected day.
+        If no snapshot exists within that window, the value is assumed to be zero.
         
         Args:
             weight_id: ID of the weight configuration used
             timestamp: Current timestamp
         """
-        # Time periods to calculate (in days)
+        # Define the periods (in days) for which to compare snapshots.
         periods = [1, 7, 30]
         
         for period in periods:
-            previous_time = timestamp - timedelta(days=period)
+            previous_time = timestamp.astimezone(timezone.utc) - timedelta(days=period)
+            
+            # Define a 24-hour window for the current timestamp's day.
+            current_start = timestamp.astimezone(timezone.utc) - timedelta(days=1)
+            current_end = timestamp.astimezone(timezone.utc)
+            
+            # Define a 24-hour window for the previous day's (or period's) snapshot.
+            previous_start = previous_time.astimezone(timezone.utc)
+            previous_end = previous_start + timedelta(days=1)
             
             with self.mindshare_db_conn.cursor(row_factory=dict_row) as cursor:
                 cursor.execute("""
                     WITH current_data AS (
-                        SELECT 
-                            project_id, 
-                            mindshare_percentage
+                        SELECT project_id, mindshare_percentage
                         FROM mindshare_snapshots
-                        WHERE weight_config_id = %s AND snapshot_timestamp BETWEEN %s - INTERVAL '10 minutes' AND %s
+                        WHERE weight_config_id = %s 
+                        AND snapshot_timestamp BETWEEN %s AND %s
+                        ORDER BY snapshot_timestamp DESC
+                        LIMIT 1
                     ),
                     previous_data AS (
-                        SELECT 
-                            project_id, 
-                            mindshare_percentage
+                        SELECT project_id, mindshare_percentage
                         FROM mindshare_snapshots
-                        WHERE weight_config_id = %s AND snapshot_timestamp BETWEEN %s - INTERVAL '10 minutes' AND %s
+                        WHERE weight_config_id = %s 
+                        AND snapshot_timestamp BETWEEN %s AND %s
+                        ORDER BY snapshot_timestamp ASC
+                        LIMIT 1
+                    ),
+                    all_projects AS (
+                        SELECT project_id FROM current_data
+                        UNION
+                        SELECT project_id FROM previous_data
                     )
                     SELECT 
-                        c.project_id,
-                        c.mindshare_percentage as current_percentage,
-                        p.mindshare_percentage as previous_percentage,
-                        (c.mindshare_percentage - p.mindshare_percentage) as change,
-                        (c.mindshare_percentage - p.mindshare_percentage) / 
-                            NULLIF(p.mindshare_percentage, 0) * 100 as percent_change
-                    FROM current_data c
-                    JOIN previous_data p ON c.project_id = p.project_id
+                        p.project_id,
+                        COALESCE(c.mindshare_percentage, 0) AS current_percentage,
+                        COALESCE(pd.mindshare_percentage, 0) AS previous_percentage,
+                        COALESCE(c.mindshare_percentage, 0) - COALESCE(pd.mindshare_percentage, 0) AS change,
+                        CASE WHEN COALESCE(pd.mindshare_percentage, 0) = 0 THEN 0
+                             ELSE (COALESCE(c.mindshare_percentage, 0) - COALESCE(pd.mindshare_percentage, 0)) / pd.mindshare_percentage * 100
+                        END AS percent_change
+                    FROM all_projects p
+                    LEFT JOIN current_data c ON p.project_id = c.project_id
+                    LEFT JOIN previous_data pd ON p.project_id = pd.project_id
                 """, (
-                    weight_id, timestamp - timedelta(minutes=10), timestamp,
-                    weight_id, previous_time - timedelta(minutes=10), previous_time
+                    weight_id, current_start, current_end,
+                    weight_id, previous_start, previous_end
                 ))
                 
                 changes = cursor.fetchall()
             
-            # Update Redis cache
+            # Update Redis cache with the computed changes.
             if changes:
                 gainers_key = f"mindshare_gainers_{period}d:{weight_id}"
                 losers_key = f"mindshare_losers_{period}d:{weight_id}"
                 
                 pipeline = self.redis_client.pipeline()
                 
-                # Clear previous data
+                # Clear previous data from cache keys.
                 pipeline.delete(gainers_key)
                 pipeline.delete(losers_key)
                 
-                # Add new data
+                # Add new data based on the computed percentage change.
                 for row in changes:
                     project_id = row['project_id']
-                    pct_change = row['percent_change'] or 0
+                    pct_change = row.get('percent_change') or 0
                     
                     if pct_change > 0:
                         pipeline.zadd(gainers_key, {str(project_id): float(pct_change)})
-                    else:
+                    elif pct_change < 0:
                         pipeline.zadd(losers_key, {str(project_id): float(abs(pct_change))})
+                    else:
+                        pipeline.zadd(gainers_key, {str(project_id): 0})
+                        pipeline.zadd(losers_key, {str(project_id): 0})
                 
-                # Set expiry (keep for 24 hours)
+                # Set expiry to 24 hours for the cache keys.
                 pipeline.expire(gainers_key, 86400)
                 pipeline.expire(losers_key, 86400)
                 
@@ -352,7 +395,6 @@ class MindshareCalculator:
         """
         logger.info("Identifying influential tweets")
         
-        # Extract weight parameters
         half_life_days = weights['time_decay_half_life_days']
         # follower_w = weights['follower_weight']
         like_w = weights['like_weight']
@@ -362,17 +404,14 @@ class MindshareCalculator:
         bookmark_w = weights['bookmark_weight']
         impression_w = weights['impression_weight']
         
-        # Filter recent tweets (last 24 hours)
-        recent_cutoff = timestamp - timedelta(days=1)
+        recent_cutoff = timestamp - timedelta(days=30)
         recent_mentions = mentions_df[pd.to_datetime(mentions_df['tweet_timestamp']) > recent_cutoff].copy()
         
         if len(recent_mentions) == 0:
             return
         
-        # Calculate engagement score for each tweet
         recent_mentions['days_ago'] = (timestamp - pd.to_datetime(recent_mentions['tweet_timestamp'])).dt.total_seconds() / (24 * 3600)
         
-        # Using half-life formula: decay_factor = 0.5^(days/half_life_days)
         recent_mentions['time_decay_factor'] = np.power(0.5, recent_mentions['days_ago'] / half_life_days)
         
         recent_mentions['weighted_score'] = (
@@ -386,18 +425,16 @@ class MindshareCalculator:
             (1 + impression_w * recent_mentions['impression_count'])
         )
         
-        # Get top tweets for each project
         top_tweets = recent_mentions.sort_values('weighted_score', ascending=False)
         top_tweets_by_project = top_tweets.groupby('project_id').head(5)
         
-        # Store in database
         try:
             with self.mindshare_db_conn.cursor() as cursor:
                 for _, row in top_tweets_by_project.iterrows():
                     cursor.execute("""
                         INSERT INTO influential_tweets 
-                        (project_id, tweet_id, weighted_score, created_at, recorded_at)
-                        VALUES (%s, %s, %s, %s, %s)
+                        (project_id, tweet_id, weighted_score, tweet_text, created_at, recorded_at)
+                        VALUES (%s, %s, %s, %s, %s, %s)
                         ON CONFLICT (project_id, tweet_id) DO UPDATE 
                         SET weighted_score = EXCLUDED.weighted_score,
                             recorded_at = EXCLUDED.recorded_at
@@ -405,6 +442,7 @@ class MindshareCalculator:
                         int(row['project_id']),
                         str(row['tweet_id']),
                         float(row['weighted_score']),
+                        row['tweet_text'],
                         row['tweet_timestamp'],
                         timestamp
                     ))
@@ -416,14 +454,14 @@ class MindshareCalculator:
     
     def recalculate_historical_mindshare(
         self, 
-        new_weight_id: int, 
+        weight_id: int, 
         days_to_recalculate: int = 7
     ) -> bool:
         """
         Recalculate historical mindshare based on new weights.
         
         Args:
-            new_weight_id: ID of the new weight configuration
+            weight_id: ID of the selected weight configuration
             days_to_recalculate: Number of days of history to recalculate
             
         Returns:
@@ -432,16 +470,16 @@ class MindshareCalculator:
         try:
             logger.info(f"Recalculating historical mindshare for past {days_to_recalculate} days")
             
-            with self.mindshare_db_conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            with self.mindshare_db_conn.cursor(row_factory=dict_row) as cursor:
                 cursor.execute("""
-                    SELECT * FROM engagement_weights WHERE weight_id = %s
-                """, (new_weight_id,))
+                    SELECT * FROM weight_config WHERE config_id = %s
+                """, (weight_id,))
                 
-                new_weights = cursor.fetchone()
-                if not new_weights:
-                    raise ValueError(f"Weight configuration {new_weight_id} not found")
+                weights = cursor.fetchone()
+                if not weights:
+                    raise ValueError(f"Weight configuration {weight_id} not found")
                 
-                new_weights = dict(new_weights)
+                weights = dict(weights['weights'])
             
             end_time = datetime.now()
             start_time = end_time - timedelta(days=days_to_recalculate)
@@ -473,7 +511,7 @@ class MindshareCalculator:
                     cursor.execute("""
                         DELETE FROM mindshare_snapshots
                         WHERE weight_config_id = %s AND snapshot_timestamp BETWEEN %s AND %s
-                    """, (new_weight_id, start_time, end_time))
+                    """, (weight_id, start_time, end_time))
                     self.mindshare_db_conn.commit()
             except Exception as e:
                 self.mindshare_db_conn.rollback()
@@ -484,7 +522,7 @@ class MindshareCalculator:
             for ts in timestamps:
                 # Filter mentions relevant to this timestamp
                 relevant_mentions = mentions_df[
-                    pd.to_datetime(mentions_df['created_at']) <= ts
+                    pd.to_datetime(mentions_df['tweet_timestamp']) <= ts
                 ].copy()
                 
                 if len(relevant_mentions) == 0:
@@ -492,7 +530,7 @@ class MindshareCalculator:
                 
                 # Calculate weighted mentions
                 project_weights = self.calculate_weighted_mentions(
-                    relevant_mentions, new_weights, ts
+                    relevant_mentions, weights, ts
                 )
                 
                 # Calculate percentages
@@ -509,11 +547,11 @@ class MindshareCalculator:
                 project_weights['ranking'] = range(1, len(project_weights) + 1)
                 
                 # Store results in database
-                self.store_mindshare_results(project_weights, new_weight_id, ts)
+                self.store_mindshare_results(project_weights, weight_id, ts)
                 
                 # If this is the most recent timestamp, update cache
                 if ts >= end_time - timedelta(hours=1):
-                    self.update_redis_cache(project_weights, new_weight_id, ts)
+                    self.update_redis_cache(project_weights, weight_id, ts)
             
             logger.info("Historical recalculation completed successfully")
             return True
@@ -534,21 +572,21 @@ class MindshareCalculator:
             
             with self.mindshare_db_conn.cursor() as cursor:
                 for table, days in retention_days.items():
-                    if table == 'tweet_mentions':
-                        cursor.execute("""
-                            DELETE FROM tweet_mentions
-                            WHERE created_at < NOW() - INTERVAL '%s days'
-                        """, (days,))
-                    elif table == 'mindshare_snapshots':
+                    # if table == 'mentions':
+                    #     cursor.execute("""
+                    #         DELETE FROM mentions
+                    #         WHERE tweet_timestamp < NOW() - INTERVAL '%s days'
+                    #     """, (days,))
+                    if table == 'mindshare_snapshots':
                         cursor.execute("""
                             DELETE FROM mindshare_snapshots
-                            WHERE snapshot_time < NOW() - INTERVAL '%s days'
+                            WHERE snapshot_timestamp < NOW() - INTERVAL '%s days'
                         """, (days,))
-                    elif table == 'influential_tweets':
-                        cursor.execute("""
-                            DELETE FROM influential_tweets
-                            WHERE recorded_at < NOW() - INTERVAL '%s days'
-                        """, (days,))
+                    # elif table == 'influential_tweets':
+                    #     cursor.execute("""
+                    #         DELETE FROM influential_tweets
+                    #         WHERE recorded_at < NOW() - INTERVAL '%s days'
+                    #     """, (days,))
                 
                 self.mindshare_db_conn.commit()
                 logger.info("Data cleanup completed")
@@ -558,9 +596,7 @@ class MindshareCalculator:
             logger.error(f"Error during data cleanup: {str(e)}", exc_info=True)
 
 def main():
-    db_config = os.getenv("MINDSHARE_DB_URL")
-    redis_config = None
-    calculator = MindshareCalculator(redis_config)
+    calculator = MindshareCalculator()
     calculator.calculate_mindshare()
 
 if __name__ == "__main__":
