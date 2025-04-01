@@ -361,7 +361,7 @@ class TweetProcessor:
                 ],
                 response_format={
                     "type": "json_schema",
-                    "schema": response_format.model_json_schema()
+                    "json_schema": {"schema": response_format.model_json_schema()}
                 },
                 temperature=0
             )
@@ -758,7 +758,7 @@ class TweetProcessor:
                 ],
                 response_format={
                     "type": "json_schema",
-                    "schema": response_format.model_json_schema()
+                    "json_schema": {"schema": response_format.model_json_schema()}
                 },
                 temperature=0
             )
